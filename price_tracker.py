@@ -49,12 +49,13 @@ class BtcPriceTracker:
     async def run(self) -> None:
         next_tick = time.monotonic()
         prev_maturity_ts: int = 0
+        consecutive_errors: int = 0
 
         async with aiohttp.ClientSession() as session:
             while not self._stop.is_set():
                 try:
                     async with session.get(
-                        BTC_URL, timeout=aiohttp.ClientTimeout(total=2)
+                        BTC_URL, timeout=aiohttp.ClientTimeout(total=5)
                     ) as resp:
                         resp.raise_for_status()
                         payload = await resp.json(content_type=None)
@@ -75,10 +76,22 @@ class BtcPriceTracker:
                         if self._on_btc_price is not None:
                             self._on_btc_price(last_price[0], ts_ms_local)
 
+                    if consecutive_errors > 0:
+                        logging.info("BTC tracker recovered after %d errors", consecutive_errors)
+                    consecutive_errors = 0
+
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logging.warning("BTC tracker error: %s", e)
+                    consecutive_errors += 1
+                    if consecutive_errors == 1:
+                        logging.warning("BTC tracker error: %s", e)
+                    elif consecutive_errors % 10 == 0:
+                        logging.error(
+                            "BTC tracker has failed %d consecutive times — "
+                            "bot has no price data and WILL NOT TRADE: %s",
+                            consecutive_errors, e,
+                        )
 
                 next_tick += POLL_INTERVAL_SEC
                 sleep_time = max(0.0, next_tick - time.monotonic())

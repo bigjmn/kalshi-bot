@@ -39,7 +39,7 @@ import random
 import signal
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, cast
