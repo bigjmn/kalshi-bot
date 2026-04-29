@@ -34,7 +34,7 @@ from true_prob import yes_probability
 WINDOW_S: float = 60.0
 EDGE_THRESHOLD: float = 0.12
 DEFAULT_KELLY_FRACTION: float = 1.0
-DEFAULT_SIGMA_FALLBACK: float = 0.3
+DEFAULT_SIGMA_FALLBACK: float = 10.0
 BALANCE_PRINT_INTERVAL_SEC: float = 300.0
 STATUS_LOG_INTERVAL_SEC: float = 20.0
 
@@ -383,9 +383,12 @@ class KalshiTrader:
                 break
             try:
                 now_ms = int(time.time() * 1000)
-                for ticker, state in list(self._states.items()):
-                    if state.is_expired(now_ms):
-                        continue
+                active = [(t, s) for t, s in list(self._states.items()) if not s.is_expired(now_ms)]
+                if not active:
+                    await self._load_market_states()
+                    now_ms = int(time.time() * 1000)
+                    active = [(t, s) for t, s in list(self._states.items()) if not s.is_expired(now_ms)]
+                for ticker, state in active:
                     if state.window_pts:
                         price = state.window_pts[-1][1]
                     elif state.last_price_before_window is not None:
