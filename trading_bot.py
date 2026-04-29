@@ -36,6 +36,7 @@ EDGE_THRESHOLD: float = 0.12
 DEFAULT_KELLY_FRACTION: float = 1.0
 DEFAULT_SIGMA_FALLBACK: float = 0.3
 BALANCE_PRINT_INTERVAL_SEC: float = 300.0
+STATUS_LOG_INTERVAL_SEC: float = 20.0
 
 
 def btc_sigma_in_window(btc_file: Path, open_ms: int, close_ms: int) -> float:
@@ -367,12 +368,42 @@ class KalshiTrader:
 
         logging.info("Loaded %d market states", len(self._states))
 
+    # ── status loop ──────────────────────────────────────────────────────────
+
+    async def _status_loop(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=STATUS_LOG_INTERVAL_SEC)
+            except asyncio.TimeoutError:
+                pass
+            if stop_event.is_set():
+                break
+            now_ms = int(time.time() * 1000)
+            for ticker, state in self._states.items():
+                if state.is_expired(now_ms):
+                    continue
+                if state.window_pts:
+                    price = state.window_pts[-1][1]
+                elif state.last_price_before_window is not None:
+                    price = state.last_price_before_window
+                else:
+                    price = None
+                p_yes = self._compute_true_prob(ticker)
+                if price is not None and p_yes is not None:
+                    logging.info(
+                        "Status: %s  BTC=$%.2f  p_yes=%.4f  p_no=%.4f",
+                        ticker, price, p_yes, 1.0 - p_yes,
+                    )
+                else:
+                    logging.info("Status: %s  BTC=N/A  p_yes=N/A", ticker)
+
     # ── run loop ─────────────────────────────────────────────────────────────
 
     async def run(self, stop_event: asyncio.Event) -> None:
         await self._load_market_states()
         await self.fetch_balance()
         logging.info("Balance: $%.2f", self._balance_cents / 100.0)
+        asyncio.create_task(self._status_loop(stop_event))
 
         while not stop_event.is_set():
             try:

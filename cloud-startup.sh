@@ -3,7 +3,7 @@
 # Clones the repo, fetches secrets, writes .env, installs systemd service.
 set -euo pipefail
 
-GITHUB_REPO="git@github.com:YOUR_USERNAME/kalshi-btc.git"
+GITHUB_REPO="git@github.com:bigjmn/kalshi-bot.git"
 INSTALL_DIR="/opt/kalshi-btc"
 SERVICE_USER="kalshi"
 KEY_PATH="/etc/kalshi/private_key.pem"
