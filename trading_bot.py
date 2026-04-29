@@ -357,13 +357,14 @@ class KalshiTrader:
             else:
                 sigma = DEFAULT_SIGMA_FALLBACK
 
-            self._states[ticker] = MarketState(
-                ticker=ticker,
-                K=float(floor_strike),
-                T_ms=float(T_ms),
-                sigma=sigma,
-            )
-            logging.info("Loaded: %s  K=%.2f  sigma=%.4f", ticker, float(floor_strike), sigma)
+            if ticker not in self._states:
+                self._states[ticker] = MarketState(
+                    ticker=ticker,
+                    K=float(floor_strike),
+                    T_ms=float(T_ms),
+                    sigma=sigma,
+                )
+                logging.info("Loaded: %s  K=%.2f  sigma=%.4f", ticker, float(floor_strike), sigma)
 
             prev_open_ms = parse_kalshi_time_ms(open_time) if open_time else None
             prev_close_ms = T_ms
@@ -427,5 +428,6 @@ class KalshiTrader:
                 for ticker in [t for t, s in self._states.items() if s.is_expired(now_ms)]:
                     del self._states[ticker]
                     logging.info("Pruned expired market: %s", ticker)
+                await self._load_market_states()
 
         self._trade_log.close()
