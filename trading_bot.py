@@ -65,6 +65,12 @@ def btc_sigma_in_window(btc_file: Path, open_ms: int, close_ms: int) -> float:
     return round(std_diffs / math.sqrt(mean_dt_s), 6)
 
 
+def btc_sigma_recent(btc_file: Path, lookback_ms: int = 1_800_000) -> float:
+    """Sigma from the most recent lookback_ms of data (default 30 min)."""
+    now = int(time.time() * 1000)
+    return btc_sigma_in_window(btc_file, now - lookback_ms, now)
+
+
 def _trapezoid(pts: list[tuple[float, float]], t_lo: float, t_hi: float) -> float:
     A = 0.0
     for i in range(len(pts) - 1):
@@ -337,25 +343,20 @@ class KalshiTrader:
         markets = await discover_btc_15m_markets(self.config)
         btc_file = self.config.markets_ref_dir / "btc_reference.jsonl"
 
-        prev_open_ms: int | None = None
-        prev_close_ms: int | None = None
+        sigma = DEFAULT_SIGMA_FALLBACK
+        if btc_file.exists():
+            computed = btc_sigma_recent(btc_file)
+            if computed > 0.0:
+                sigma = computed
 
         for m in markets:
             ticker = m.get("ticker")
             floor_strike = m.get("floor_strike")
             close_time = m.get("close_time")
-            open_time = m.get("open_time")
             if not ticker or floor_strike is None or not close_time:
                 continue
 
             T_ms = parse_kalshi_time_ms(close_time)
-
-            if prev_open_ms is not None and prev_close_ms is not None and btc_file.exists():
-                sigma = btc_sigma_in_window(btc_file, prev_open_ms, prev_close_ms)
-                if sigma <= 0.0:
-                    sigma = DEFAULT_SIGMA_FALLBACK
-            else:
-                sigma = DEFAULT_SIGMA_FALLBACK
 
             if ticker not in self._states:
                 self._states[ticker] = MarketState(
@@ -365,11 +366,10 @@ class KalshiTrader:
                     sigma=sigma,
                 )
                 logging.info("Loaded: %s  K=%.2f  sigma=%.4f", ticker, float(floor_strike), sigma)
+            else:
+                self._states[ticker].sigma = sigma
 
-            prev_open_ms = parse_kalshi_time_ms(open_time) if open_time else None
-            prev_close_ms = T_ms
-
-        logging.info("Loaded %d market states", len(self._states))
+        logging.info("Loaded %d market states  sigma=%.4f", len(self._states), sigma)
 
     # ── status loop ──────────────────────────────────────────────────────────
 
