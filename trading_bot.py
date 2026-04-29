@@ -378,24 +378,29 @@ class KalshiTrader:
                 pass
             if stop_event.is_set():
                 break
-            now_ms = int(time.time() * 1000)
-            for ticker, state in self._states.items():
-                if state.is_expired(now_ms):
-                    continue
-                if state.window_pts:
-                    price = state.window_pts[-1][1]
-                elif state.last_price_before_window is not None:
-                    price = state.last_price_before_window
-                else:
-                    price = None
-                p_yes = self._compute_true_prob(ticker)
-                if price is not None and p_yes is not None:
-                    logging.info(
-                        "Status: %s  BTC=$%.2f  p_yes=%.4f  p_no=%.4f",
-                        ticker, price, p_yes, 1.0 - p_yes,
-                    )
-                else:
-                    logging.info("Status: %s  BTC=N/A  p_yes=N/A", ticker)
+            try:
+                now_ms = int(time.time() * 1000)
+                for ticker, state in list(self._states.items()):
+                    if state.is_expired(now_ms):
+                        continue
+                    if state.window_pts:
+                        price = state.window_pts[-1][1]
+                    elif state.last_price_before_window is not None:
+                        price = state.last_price_before_window
+                    else:
+                        price = None
+                    p_yes = self._compute_true_prob(ticker)
+                    if price is not None and p_yes is not None:
+                        logging.info(
+                            "Status: %s  BTC=$%.2f  p_yes=%.4f  p_no=%.4f  yes_ask=%.4f  no_ask=%.4f",
+                            ticker, price, p_yes, 1.0 - p_yes,
+                            state.latest_yes_ask if state.latest_yes_ask is not None else float("nan"),
+                            state.latest_no_ask if state.latest_no_ask is not None else float("nan"),
+                        )
+                    else:
+                        logging.info("Status: %s  BTC=N/A  p_yes=N/A", ticker)
+            except Exception as exc:
+                logging.warning("Status loop error: %s", exc)
 
     # ── run loop ─────────────────────────────────────────────────────────────
 
