@@ -24,6 +24,7 @@ BTC_URL = (
     "?allowRequestEvenIfPageIsHidden=true"
 )
 POLL_INTERVAL_SEC = 1.0
+MAX_CONSECUTIVE_ERRORS = 30
 
 
 class BtcPriceTracker:
@@ -91,6 +92,10 @@ class BtcPriceTracker:
                             "BTC tracker has failed %d consecutive times — "
                             "bot has no price data and WILL NOT TRADE: %s",
                             consecutive_errors, e,
+                        )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        raise RuntimeError(
+                            f"BTC tracker failed {consecutive_errors} consecutive times, forcing restart"
                         )
 
                 next_tick += POLL_INTERVAL_SEC

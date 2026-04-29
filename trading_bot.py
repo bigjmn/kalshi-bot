@@ -169,6 +169,8 @@ class KalshiTrader:
         p_yes = self._compute_true_prob(ticker)
         if p_yes is None:
             return
+        if p_yes < 0.001 or p_yes > 0.999:
+            return
         p_no = 1.0 - p_yes
 
         if not state.has_yes_bet and (ticker, "yes") not in self._pending_orders:
@@ -391,9 +393,12 @@ class KalshiTrader:
                         price = None
                     p_yes = self._compute_true_prob(ticker)
                     if price is not None and p_yes is not None:
+                        tau = state.tau_sec(now_ms)
                         logging.info(
-                            "Status: %s  BTC=$%.2f  p_yes=%.4f  p_no=%.4f  yes_ask=%.4f  no_ask=%.4f",
-                            ticker, price, p_yes, 1.0 - p_yes,
+                            "Status: %s  BTC=$%.2f  K=%.2f  sigma=%.4f  tau=%.0fs  "
+                            "p_yes=%.4f  p_no=%.4f  yes_ask=%.4f  no_ask=%.4f",
+                            ticker, price, state.K, state.sigma, tau,
+                            p_yes, 1.0 - p_yes,
                             state.latest_yes_ask if state.latest_yes_ask is not None else float("nan"),
                             state.latest_no_ask if state.latest_no_ask is not None else float("nan"),
                         )
