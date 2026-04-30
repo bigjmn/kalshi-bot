@@ -32,7 +32,7 @@ from kalshi_orderbook_collector import (
 from true_prob import yes_probability
 
 WINDOW_S: float = 60.0
-EDGE_THRESHOLD: float = 0.12
+EDGE_THRESHOLD: float = 0.2
 DEFAULT_KELLY_FRACTION: float = 1.0
 DEFAULT_SIGMA_FALLBACK: float = 10.0
 BALANCE_PRINT_INTERVAL_SEC: float = 300.0
