@@ -37,6 +37,7 @@ DEFAULT_KELLY_FRACTION: float = 1.0
 DEFAULT_SIGMA_FALLBACK: float = 10.0
 BALANCE_PRINT_INTERVAL_SEC: float = 300.0
 STATUS_LOG_INTERVAL_SEC: float = 20.0
+CASHOUT_DELTA: float | None = 0.25
 
 
 def btc_sigma_in_window(btc_file: Path, open_ms: int, close_ms: int) -> float:
@@ -101,6 +102,10 @@ class MarketState:
     latest_no_ask: float | None = None
     has_yes_bet: bool = False
     has_no_bet: bool = False
+    yes_entry_price: float | None = None
+    no_entry_price: float | None = None
+    yes_position_count: int = 0
+    no_position_count: int = 0
 
     def __post_init__(self) -> None:
         self.window_open_sec = self.T_ms / 1000.0 - WINDOW_S
@@ -193,6 +198,21 @@ class KalshiTrader:
                 self._pending_orders.add((ticker, "no"))
                 asyncio.create_task(self._handle_signal(ticker, p_no, ask, "no"))
 
+        if CASHOUT_DELTA is not None:
+            for side, has_bet, entry_price, opp_ask in (
+                ("yes", state.has_yes_bet, state.yes_entry_price, state.latest_no_ask),
+                ("no",  state.has_no_bet,  state.no_entry_price,  state.latest_yes_ask),
+            ):
+                current_ask = state.latest_yes_ask if side == "yes" else state.latest_no_ask
+                if (has_bet and entry_price is not None and current_ask is not None
+                        and opp_ask is not None
+                        and current_ask >= entry_price + CASHOUT_DELTA
+                        and (ticker, f"{side}_sell") not in self._pending_orders):
+                    logging.info("Cashout trigger: %s %s  entry=%.4f  now=%.4f",
+                                 side.upper(), ticker, entry_price, current_ask)
+                    self._pending_orders.add((ticker, f"{side}_sell"))
+                    asyncio.create_task(self._handle_cashout(ticker, side))
+
     # ── probability ──────────────────────────────────────────────────────────
 
     def _compute_true_prob(self, ticker: str) -> float | None:
@@ -249,14 +269,14 @@ class KalshiTrader:
                 logging.error("fetch_balance failed: %s", exc)
         return self._balance_cents
 
-    async def _place_order(self, ticker: str, price_cents: int, count: int, side: str) -> bool:
+    async def _place_order(self, ticker: str, price_cents: int, count: int, side: str, action: str = "buy") -> bool:
         path = "/trade-api/v2/portfolio/orders"
         headers = self.signer.create_headers("POST", path)
         price_key = "yes_price" if side == "yes" else "no_price"
         body = {
             "ticker": ticker,
             "side": side,
-            "action": "buy",
+            "action": action,
             "type": "limit",
             "count": count,
             price_key: price_cents,
@@ -265,6 +285,7 @@ class KalshiTrader:
             "ts_ms_local": int(time.time() * 1000),
             "ticker": ticker,
             "side": side,
+            "action": action,
             "price_cents": price_cents,
             "count": count,
             "status": "unknown",
@@ -287,8 +308,8 @@ class KalshiTrader:
                     if resp.ok:
                         record["status"] = "ok"
                         success = True
-                        logging.info("Order placed: %s %s  count=%d  price=%d¢",
-                                     side.upper(), ticker, count, price_cents)
+                        logging.info("Order placed: %s %s %s  count=%d  price=%d¢",
+                                     action.upper(), side.upper(), ticker, count, price_cents)
                     else:
                         record["status"] = "error"
                         logging.error("Order rejected: %s %s  status=%d  %s",
@@ -327,7 +348,16 @@ class KalshiTrader:
             logging.info("Placing %s: %s  p=%.4f  ask=%.4f  edge=+%.4f  count=%d  balance=$%.2f",
                          side.upper(), ticker, p, current_ask, p - current_ask,
                          count, balance_cents / 100.0)
-            await self._place_order(ticker, price_cents, count, side)
+            success = await self._place_order(ticker, price_cents, count, side)
+            if success and CASHOUT_DELTA is not None:
+                state = self._states.get(ticker)
+                if state is not None:
+                    if side == "yes":
+                        state.yes_entry_price = current_ask
+                        state.yes_position_count = count
+                    else:
+                        state.no_entry_price = current_ask
+                        state.no_position_count = count
         finally:
             state = self._states.get(ticker)
             if state is not None:
@@ -336,6 +366,43 @@ class KalshiTrader:
                 else:
                     state.has_no_bet = True
             self._pending_orders.discard((ticker, side))
+
+    # ── cashout handler ──────────────────────────────────────────────────────
+
+    async def _handle_cashout(self, ticker: str, side: str) -> None:
+        try:
+            state = self._states.get(ticker)
+            if state is None:
+                return
+            entry_price = state.yes_entry_price if side == "yes" else state.no_entry_price
+            count = state.yes_position_count if side == "yes" else state.no_position_count
+            if entry_price is None or count == 0:
+                return
+            current_ask = state.latest_yes_ask if side == "yes" else state.latest_no_ask
+            opp_ask = state.latest_no_ask if side == "yes" else state.latest_yes_ask
+            if current_ask is None or opp_ask is None or CASHOUT_DELTA is None:
+                return
+            if current_ask < entry_price + CASHOUT_DELTA:
+                logging.info("Cashout edge evaporated for %s %s", side.upper(), ticker)
+                return
+            # Sell at the opposite side's ask complement (= our bid)
+            sell_price_cents = max(1, min(99, round((1.0 - opp_ask) * 100)))
+            logging.info("Cashing out %s: %s  entry=%.4f  now=%.4f  count=%d  sell=%d¢",
+                         side.upper(), ticker, entry_price, current_ask, count, sell_price_cents)
+            success = await self._place_order(ticker, sell_price_cents, count, side, action="sell")
+            if success:
+                state = self._states.get(ticker)
+                if state is not None:
+                    if side == "yes":
+                        state.yes_entry_price = None
+                        state.yes_position_count = 0
+                        state.has_yes_bet = False
+                    else:
+                        state.no_entry_price = None
+                        state.no_position_count = 0
+                        state.has_no_bet = False
+        finally:
+            self._pending_orders.discard((ticker, f"{side}_sell"))
 
     # ── market loading ───────────────────────────────────────────────────────
 
