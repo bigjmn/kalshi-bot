@@ -23,6 +23,8 @@ export PATH="/root/.local/bin:$PATH"
 mkdir -p /root/.ssh
 gcloud secrets versions access latest --secret="github-deploy-key" > /root/.ssh/github_deploy_key
 chmod 600 /root/.ssh/github_deploy_key
+gcloud secrets versions access latest --secret="firebase-credentials" > /etc/kalshi/firebase-credentials.json
+chmod 600 /etc/kalshi/firebase-credentials.json
 ssh-keyscan github.com >> /root/.ssh/known_hosts
 cat >> /root/.ssh/config <<EOF
 Host github.com

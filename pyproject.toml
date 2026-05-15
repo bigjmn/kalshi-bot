@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.5",
     "cryptography>=46.0.7",
+    "firebase-admin>=6.5.0",
     "python-dotenv>=1.2.2",
     "websockets>=16.0",
 ]

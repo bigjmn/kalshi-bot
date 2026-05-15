@@ -29,6 +29,7 @@ from kalshi_orderbook_collector import (
     discover_btc_15m_markets,
     parse_kalshi_time_ms,
 )
+from firebase_logger import FirebaseLogger
 from true_prob import yes_probability
 
 WINDOW_S: float = 60.0
@@ -40,36 +41,53 @@ STATUS_LOG_INTERVAL_SEC: float = 20.0
 CASHOUT_DELTA: float | None = 0.25
 
 
-def btc_sigma_in_window(btc_file: Path, open_ms: int, close_ms: int) -> float:
-    """ABM sigma in USD/sqrt(s): std(price_diffs) / sqrt(mean_dt_s)."""
-    records: list[tuple[int, float]] = []
+def btc_sigma_recent(btc_file: Path, lookback_ms: int = 7_200_000, step_s: float = 60.0) -> float:
+    """
+    ABM sigma in USD/sqrt(s) from recent BTC tick data.
+
+    Downsamples to `step_s`-second intervals before computing diffs. This is
+    critical because Kalshi's reference price is a smoothed TWAP index whose
+    consecutive-tick diffs severely underestimate long-range volatility. Using
+    60-second intervals removes autocorrelation and captures the true random-walk
+    sigma at the scale that matters for settlement.
+    """
+    now = int(time.time() * 1000)
+    cutoff = now - lookback_ms
+    step_ms = int(step_s * 1000)
+
+    raw: list[tuple[int, float]] = []
     with btc_file.open() as f:
         for line in f:
             obj = json.loads(line)
             t = obj.get("ts_ms_local") or obj.get("timestamp")
-            if t is None:
+            if t is None or t < cutoff or t > now:
                 continue
-            if open_ms <= t <= close_ms:
-                records.append((t, obj["last_price"][0]))
-    records.sort()
-    if len(records) < 2:
+            raw.append((t, obj["last_price"][0]))
+    raw.sort()
+    if not raw:
         return 0.0
-    timestamps = [r[0] for r in records]
-    prices = [r[1] for r in records]
-    diffs = [prices[i + 1] - prices[i] for i in range(len(prices) - 1)]
-    mean_dt_s = (timestamps[-1] - timestamps[0]) / 1000.0 / (len(timestamps) - 1)
+
+    # Downsample: one price per step_s bucket (first record wins)
+    sampled: list[tuple[int, float]] = []
+    bucket = raw[0][0] // step_ms
+    for t, p in raw:
+        b = t // step_ms
+        if b != bucket or not sampled:
+            sampled.append((t, p))
+            bucket = b
+
+    if len(sampled) < 2:
+        return 0.0
+
+    diffs = [sampled[i + 1][1] - sampled[i][1] for i in range(len(sampled) - 1)]
+    dt_s = [(sampled[i + 1][0] - sampled[i][0]) / 1000.0 for i in range(len(sampled) - 1)]
+    mean_dt_s = sum(dt_s) / len(dt_s)
     if mean_dt_s <= 0.0:
         return 0.0
     n = len(diffs)
     mean_d = sum(diffs) / n
     std_diffs = math.sqrt(sum((d - mean_d) ** 2 for d in diffs) / (n - 1))
     return round(std_diffs / math.sqrt(mean_dt_s), 6)
-
-
-def btc_sigma_recent(btc_file: Path, lookback_ms: int = 1_800_000) -> float:
-    """Sigma from the most recent lookback_ms of data (default 30 min)."""
-    now = int(time.time() * 1000)
-    return btc_sigma_in_window(btc_file, now - lookback_ms, now)
 
 
 def _trapezoid(pts: list[tuple[float, float]], t_lo: float, t_hi: float) -> float:
@@ -102,10 +120,21 @@ class MarketState:
     latest_no_ask: float | None = None
     has_yes_bet: bool = False
     has_no_bet: bool = False
+    market_open_ms: int | None = None
     yes_entry_price: float | None = None
     no_entry_price: float | None = None
     yes_position_count: int = 0
     no_position_count: int = 0
+    yes_win_pct: float | None = None
+    no_win_pct: float | None = None
+    yes_edge: float | None = None
+    no_edge: float | None = None
+    yes_bet_time_ms: int | None = None
+    no_bet_time_ms: int | None = None
+    yes_sigma: float | None = None
+    no_sigma: float | None = None
+    yes_firebase_doc_id: str | None = None
+    no_firebase_doc_id: str | None = None
 
     def __post_init__(self) -> None:
         self.window_open_sec = self.T_ms / 1000.0 - WINDOW_S
@@ -140,13 +169,19 @@ class MarketState:
 
 
 class KalshiTrader:
-    def __init__(self, config: KalshiConfig, kelly_fraction: float = DEFAULT_KELLY_FRACTION):
+    def __init__(
+        self,
+        config: KalshiConfig,
+        kelly_fraction: float = DEFAULT_KELLY_FRACTION,
+        firebase: FirebaseLogger | None = None,
+    ):
         self.config = config
         self.kelly_fraction = kelly_fraction
         self.signer = KalshiSigner(config.key_id, config.private_key_path)
         self._states: dict[str, MarketState] = {}
         self._balance_cents: int = 0
         self._pending_orders: set[tuple[str, str]] = set()
+        self._firebase = firebase or FirebaseLogger(None)
 
         log_path = config.output_dir / "trade_log.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,16 +383,41 @@ class KalshiTrader:
             logging.info("Placing %s: %s  p=%.4f  ask=%.4f  edge=+%.4f  count=%d  balance=$%.2f",
                          side.upper(), ticker, p, current_ask, p - current_ask,
                          count, balance_cents / 100.0)
+            bet_time_ms = int(time.time() * 1000)
             success = await self._place_order(ticker, price_cents, count, side)
-            if success and CASHOUT_DELTA is not None:
+            if success:
                 state = self._states.get(ticker)
                 if state is not None:
+                    edge = p - current_ask
                     if side == "yes":
                         state.yes_entry_price = current_ask
                         state.yes_position_count = count
+                        state.yes_win_pct = p
+                        state.yes_edge = edge
+                        state.yes_bet_time_ms = bet_time_ms
+                        state.yes_sigma = state.sigma
                     else:
                         state.no_entry_price = current_ask
                         state.no_position_count = count
+                        state.no_win_pct = p
+                        state.no_edge = edge
+                        state.no_bet_time_ms = bet_time_ms
+                        state.no_sigma = state.sigma
+                    doc_id = await self._firebase.log_bet(
+                        ticker=ticker,
+                        market_open_ms=state.market_open_ms,
+                        side=side,
+                        ask_price=current_ask,
+                        win_pct=p,
+                        edge=edge,
+                        contract_count=count,
+                        sigma=state.sigma,
+                        bet_time_ms=bet_time_ms,
+                    )
+                    if side == "yes":
+                        state.yes_firebase_doc_id = doc_id
+                    else:
+                        state.no_firebase_doc_id = doc_id
         finally:
             state = self._states.get(ticker)
             if state is not None:
@@ -393,16 +453,72 @@ class KalshiTrader:
             if success:
                 state = self._states.get(ticker)
                 if state is not None:
+                    doc_id = state.yes_firebase_doc_id if side == "yes" else state.no_firebase_doc_id
+                    await self._firebase.update_cashout(
+                        doc_id=doc_id or "",
+                        sell_price=sell_price_cents / 100.0,
+                        contract_count=count,
+                        ask_price=entry_price,
+                        close_time_ms=int(time.time() * 1000),
+                    )
                     if side == "yes":
                         state.yes_entry_price = None
                         state.yes_position_count = 0
                         state.has_yes_bet = False
+                        state.yes_firebase_doc_id = None
                     else:
                         state.no_entry_price = None
                         state.no_position_count = 0
                         state.has_no_bet = False
+                        state.no_firebase_doc_id = None
         finally:
             self._pending_orders.discard((ticker, f"{side}_sell"))
+
+    # ── settlement ───────────────────────────────────────────────────────────
+
+    async def _fetch_market_result(self, ticker: str) -> str | None:
+        """Returns 'yes', 'no', or None if not yet settled."""
+        path = f"/trade-api/v2/markets/{ticker}"
+        headers = self.signer.create_headers("GET", path)
+        url = self.config.rest_base_url + f"/markets/{ticker}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.ok:
+                        data = await resp.json(content_type=None)
+                        result = (data.get("market") or data).get("result")
+                        return result if result in ("yes", "no") else None
+            except Exception as exc:
+                logging.error("_fetch_market_result failed for %s: %s", ticker, exc)
+        return None
+
+    async def _settle_market(self, ticker: str, state: MarketState) -> None:
+        close_time_ms = int(time.time() * 1000)
+        has_yes = state.has_yes_bet and state.yes_firebase_doc_id is not None and state.yes_entry_price is not None
+        has_no = state.has_no_bet and state.no_firebase_doc_id is not None and state.no_entry_price is not None
+        if not has_yes and not has_no:
+            return
+        result = await self._fetch_market_result(ticker)
+        if result is None:
+            logging.warning("Settlement not yet available for %s; Firebase record left open", ticker)
+            return
+        if has_yes and state.yes_firebase_doc_id and state.yes_entry_price is not None:
+            await self._firebase.update_settlement(
+                doc_id=state.yes_firebase_doc_id,
+                won=(result == "yes"),
+                contract_count=state.yes_position_count,
+                ask_price=state.yes_entry_price,
+                close_time_ms=close_time_ms,
+            )
+        if has_no and state.no_firebase_doc_id and state.no_entry_price is not None:
+            await self._firebase.update_settlement(
+                doc_id=state.no_firebase_doc_id,
+                won=(result == "no"),
+                contract_count=state.no_position_count,
+                ask_price=state.no_entry_price,
+                close_time_ms=close_time_ms,
+            )
 
     # ── market loading ───────────────────────────────────────────────────────
 
@@ -420,10 +536,12 @@ class KalshiTrader:
             ticker = m.get("ticker")
             floor_strike = m.get("floor_strike")
             close_time = m.get("close_time")
+            open_time = m.get("open_time")
             if not ticker or floor_strike is None or not close_time:
                 continue
 
             T_ms = parse_kalshi_time_ms(close_time)
+            open_ms = parse_kalshi_time_ms(open_time) if open_time else None
 
             if ticker not in self._states:
                 self._states[ticker] = MarketState(
@@ -431,6 +549,7 @@ class KalshiTrader:
                     K=float(floor_strike),
                     T_ms=float(T_ms),
                     sigma=sigma,
+                    market_open_ms=open_ms,
                 )
                 logging.info("Loaded: %s  K=%.2f  sigma=%.4f", ticker, float(floor_strike), sigma)
             else:
@@ -495,7 +614,8 @@ class KalshiTrader:
                 await self.fetch_balance()
                 logging.info("Balance: $%.2f", self._balance_cents / 100.0)
                 now_ms = int(time.time() * 1000)
-                for ticker in [t for t, s in self._states.items() if s.is_expired(now_ms)]:
+                for ticker, state in [(t, s) for t, s in self._states.items() if s.is_expired(now_ms)]:
+                    await self._settle_market(ticker, state)
                     del self._states[ticker]
                     logging.info("Pruned expired market: %s", ticker)
                 await self._load_market_states()

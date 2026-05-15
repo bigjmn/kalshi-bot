@@ -23,6 +23,7 @@ from kalshi_orderbook_collector import (
     discover_btc_15m_markets,
     load_config_from_env,
 )
+from firebase_logger import FirebaseLogger
 from price_tracker import BtcPriceTracker
 from trading_bot import DEFAULT_KELLY_FRACTION, KalshiTrader
 
@@ -36,7 +37,11 @@ async def amain() -> None:
     logging.info("Tracking %d markets", len(config.market_tickers))
 
     kelly_fraction = float(os.getenv("KALSHI_KELLY_FRACTION", str(DEFAULT_KELLY_FRACTION)))
-    trader = KalshiTrader(config, kelly_fraction=kelly_fraction)
+    firebase = FirebaseLogger(
+        credentials_path=os.getenv("FIREBASE_CREDENTIALS_PATH"),
+        project_id=os.getenv("FIREBASE_PROJECT_ID"),
+    )
+    trader = KalshiTrader(config, kelly_fraction=kelly_fraction, firebase=firebase)
 
     collector = KalshiCollector(config, on_book_state=trader.on_book_state)
     price_tracker = BtcPriceTracker(
