@@ -58,11 +58,14 @@ def btc_sigma_recent(btc_file: Path, lookback_ms: int = 7_200_000, step_s: float
     raw: list[tuple[int, float]] = []
     with btc_file.open() as f:
         for line in f:
-            obj = json.loads(line)
-            t = obj.get("ts_ms_local") or obj.get("timestamp")
-            if t is None or t < cutoff or t > now:
+            try:
+                obj = json.loads(line)
+                t = obj.get("ts_ms_local") or obj.get("timestamp")
+                if t is None or t < cutoff or t > now:
+                    continue
+                raw.append((t, obj["last_price"][0]))
+            except (json.JSONDecodeError, KeyError, IndexError, TypeError):
                 continue
-            raw.append((t, obj["last_price"][0]))
     raw.sort()
     if not raw:
         return 0.0
@@ -212,6 +215,21 @@ class KalshiTrader:
                 except ValueError:
                     pass
 
+        if CASHOUT_DELTA is not None:
+            for side, has_bet, entry_price, opp_ask in (
+                ("yes", state.has_yes_bet, state.yes_entry_price, state.latest_no_ask),
+                ("no",  state.has_no_bet,  state.no_entry_price,  state.latest_yes_ask),
+            ):
+                current_ask = state.latest_yes_ask if side == "yes" else state.latest_no_ask
+                if (has_bet and entry_price is not None and current_ask is not None
+                        and opp_ask is not None
+                        and current_ask >= entry_price + CASHOUT_DELTA
+                        and (ticker, f"{side}_sell") not in self._pending_orders):
+                    logging.info("Cashout trigger: %s %s  entry=%.4f  now=%.4f",
+                                 side.upper(), ticker, entry_price, current_ask)
+                    self._pending_orders.add((ticker, f"{side}_sell"))
+                    asyncio.create_task(self._handle_cashout(ticker, side))
+
         p_yes = self._compute_true_prob(ticker)
         if p_yes is None:
             return
@@ -232,21 +250,6 @@ class KalshiTrader:
                 logging.info("NO edge:  %s  p=%.4f  ask=%.4f  edge=+%.4f", ticker, p_no, ask, p_no - ask)
                 self._pending_orders.add((ticker, "no"))
                 asyncio.create_task(self._handle_signal(ticker, p_no, ask, "no"))
-
-        if CASHOUT_DELTA is not None:
-            for side, has_bet, entry_price, opp_ask in (
-                ("yes", state.has_yes_bet, state.yes_entry_price, state.latest_no_ask),
-                ("no",  state.has_no_bet,  state.no_entry_price,  state.latest_yes_ask),
-            ):
-                current_ask = state.latest_yes_ask if side == "yes" else state.latest_no_ask
-                if (has_bet and entry_price is not None and current_ask is not None
-                        and opp_ask is not None
-                        and current_ask >= entry_price + CASHOUT_DELTA
-                        and (ticker, f"{side}_sell") not in self._pending_orders):
-                    logging.info("Cashout trigger: %s %s  entry=%.4f  now=%.4f",
-                                 side.upper(), ticker, entry_price, current_ask)
-                    self._pending_orders.add((ticker, f"{side}_sell"))
-                    asyncio.create_task(self._handle_cashout(ticker, side))
 
     # ── probability ──────────────────────────────────────────────────────────
 
@@ -464,12 +467,10 @@ class KalshiTrader:
                     if side == "yes":
                         state.yes_entry_price = None
                         state.yes_position_count = 0
-                        state.has_yes_bet = False
                         state.yes_firebase_doc_id = None
                     else:
                         state.no_entry_price = None
                         state.no_position_count = 0
-                        state.has_no_bet = False
                         state.no_firebase_doc_id = None
         finally:
             self._pending_orders.discard((ticker, f"{side}_sell"))
