@@ -597,6 +597,45 @@ class KalshiTrader:
             except Exception as exc:
                 logging.warning("Status loop error: %s", exc)
 
+    # ── data cleanup ─────────────────────────────────────────────────────────
+
+    def _cleanup_data(self) -> None:
+        keep_ms = 7_200_000  # 2 hours
+        cutoff_ms = int(time.time() * 1000) - keep_ms
+        cutoff_mtime = time.time() - keep_ms / 1000.0
+
+        # Compact btc_reference.jsonl — keep only the last 2 hours
+        btc_file = self.config.markets_ref_dir / "btc_reference.jsonl"
+        if btc_file.exists():
+            try:
+                kept = []
+                with btc_file.open() as f:
+                    for line in f:
+                        try:
+                            t = json.loads(line).get("ts_ms_local", 0)
+                            if t >= cutoff_ms:
+                                kept.append(line)
+                        except json.JSONDecodeError:
+                            pass
+                with btc_file.open("w") as f:
+                    f.writelines(kept)
+                logging.info("Compacted btc_reference.jsonl → %d records", len(kept))
+            except Exception as exc:
+                logging.warning("btc_reference compact failed: %s", exc)
+
+        # Delete market subdirectories not modified in the last 2 hours
+        markets_dir = self.config.markets_ref_dir
+        for subdir in markets_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            try:
+                if subdir.stat().st_mtime < cutoff_mtime:
+                    import shutil
+                    shutil.rmtree(subdir)
+                    logging.info("Deleted old market data: %s", subdir.name)
+            except Exception as exc:
+                logging.warning("Failed to delete %s: %s", subdir, exc)
+
     # ── run loop ─────────────────────────────────────────────────────────────
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -619,5 +658,6 @@ class KalshiTrader:
                     del self._states[ticker]
                     logging.info("Pruned expired market: %s", ticker)
                 await self._load_market_states()
+                self._cleanup_data()
 
         self._trade_log.close()

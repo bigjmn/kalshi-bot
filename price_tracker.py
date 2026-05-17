@@ -71,7 +71,6 @@ class BtcPriceTracker:
                                 "ts_ms_local": ts_ms_local,
                                 "timestamp": maturity_ts_ms,
                                 "last_price": last_price,
-                                "raw": payload,
                             }
                         )
                         if self._on_btc_price is not None:
