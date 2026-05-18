@@ -20,7 +20,7 @@ fi
 export PATH="/root/.local/bin:$PATH"
 
 # ── github ssh key ───────────────────────────────────────────────────────────
-mkdir -p /root/.ssh
+mkdir -p /root/.ssh /etc/kalshi
 gcloud secrets versions access latest --secret="github-deploy-key" > /root/.ssh/github_deploy_key
 chmod 600 /root/.ssh/github_deploy_key
 gcloud secrets versions access latest --secret="firebase-credentials" > /etc/kalshi/firebase-credentials.json
@@ -56,6 +56,8 @@ KALSHI_SNAPSHOT_INTERVAL_SEC=1.0
 KALSHI_REST_SEED=True
 KALSHI_DISCOVERY_LOOKAHEAD_MIN=900
 KALSHI_KELLY_FRACTION=1.0
+FIREBASE_CREDENTIALS_PATH=/etc/kalshi/firebase-credentials.json
+FIREBASE_PROJECT_ID=kalshi-bot-494522
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 

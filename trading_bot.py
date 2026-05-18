@@ -39,6 +39,9 @@ DEFAULT_SIGMA_FALLBACK: float = 10.0
 BALANCE_PRINT_INTERVAL_SEC: float = 300.0
 STATUS_LOG_INTERVAL_SEC: float = 20.0
 CASHOUT_DELTA: float | None = None
+DAYTIME_ONLY: bool = True
+DAYTIME_START_HOUR: int = 8   # 8 AM local time
+DAYTIME_END_HOUR: int = 21    # 9 PM local time
 
 
 def btc_sigma_recent(btc_file: Path, lookback_ms: int = 7_200_000, step_s: float = 60.0) -> float:
@@ -91,6 +94,10 @@ def btc_sigma_recent(btc_file: Path, lookback_ms: int = 7_200_000, step_s: float
     mean_d = sum(diffs) / n
     std_diffs = math.sqrt(sum((d - mean_d) ** 2 for d in diffs) / (n - 1))
     return round(std_diffs / math.sqrt(mean_dt_s), 6)
+
+
+def _is_daytime() -> bool:
+    return DAYTIME_START_HOUR <= time.localtime().tm_hour < DAYTIME_END_HOUR
 
 
 def _trapezoid(pts: list[tuple[float, float]], t_lo: float, t_hi: float) -> float:
@@ -229,6 +236,9 @@ class KalshiTrader:
                                  side.upper(), ticker, entry_price, current_ask)
                     self._pending_orders.add((ticker, f"{side}_sell"))
                     asyncio.create_task(self._handle_cashout(ticker, side))
+
+        if DAYTIME_ONLY and not _is_daytime():
+            return
 
         p_yes = self._compute_true_prob(ticker)
         if p_yes is None:
