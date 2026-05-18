@@ -33,12 +33,12 @@ from firebase_logger import FirebaseLogger
 from true_prob import yes_probability
 
 WINDOW_S: float = 60.0
-EDGE_THRESHOLD: float = 0.2
+EDGE_THRESHOLD: float = 0.25
 DEFAULT_KELLY_FRACTION: float = 1.0
 DEFAULT_SIGMA_FALLBACK: float = 10.0
 BALANCE_PRINT_INTERVAL_SEC: float = 300.0
 STATUS_LOG_INTERVAL_SEC: float = 20.0
-CASHOUT_DELTA: float | None = 0.25
+CASHOUT_DELTA: float | None = None
 
 
 def btc_sigma_recent(btc_file: Path, lookback_ms: int = 7_200_000, step_s: float = 60.0) -> float:
