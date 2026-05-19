@@ -97,7 +97,10 @@ def btc_sigma_recent(btc_file: Path, lookback_ms: int = 7_200_000, step_s: float
 
 
 def _is_daytime() -> bool:
-    return DAYTIME_START_HOUR <= time.localtime().tm_hour < DAYTIME_END_HOUR
+    from datetime import datetime, timezone, timedelta
+    edt = timezone(timedelta(hours=-4))
+    hour = datetime.now(tz=edt).hour
+    return DAYTIME_START_HOUR <= hour < DAYTIME_END_HOUR
 
 
 def _trapezoid(pts: list[tuple[float, float]], t_lo: float, t_hi: float) -> float:
